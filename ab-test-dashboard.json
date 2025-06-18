@@ -1,0 +1,935 @@
+import React, { useState, useEffect, useMemo } from 'react';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, BarChart, Bar, RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, Radar, Area, AreaChart, ReferenceLine } from 'recharts';
+import { AlertCircle, TrendingUp, TrendingDown, Users, DollarSign, MousePointer, Eye, ChevronDown, ChevronUp, Activity, Zap, Target, Award, Calendar, Upload, FileText } from 'lucide-react';
+
+const Dashboard = () => {
+  const [rawData, setRawData] = useState([]);
+  const [selectedMetric, setSelectedMetric] = useState('% Difference in RPS (SERP Sessions) from the First along Experiment ID_D');
+  const [showDetails, setShowDetails] = useState({});
+  const [expandedBranch, setExpandedBranch] = useState(null);
+  const [hoveredCard, setHoveredCard] = useState(null);
+  const [visibleBranches, setVisibleBranches] = useState({});
+  const [dateRange, setDateRange] = useState({ start: 0, end: 100 });
+  const [allDates, setAllDates] = useState([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const [fileName, setFileName] = useState('');
+
+  // Handle file upload
+  const handleFileUpload = async (event) => {
+    const file = event.target.files[0];
+    if (!file) return;
+    
+    setIsLoading(true);
+    setFileName(file.name);
+    
+    try {
+      const reader = new FileReader();
+      
+      reader.onload = async (e) => {
+        const arrayBuffer = e.target.result;
+        
+        // Try to detect encoding by checking for BOM markers
+        const uint8Array = new Uint8Array(arrayBuffer);
+        let encoding = 'utf-8';
+        
+        // Check for UTF-16 LE BOM (FF FE)
+        if (uint8Array[0] === 0xFF && uint8Array[1] === 0xFE) {
+          encoding = 'utf-16le';
+        }
+        // Check for UTF-16 BE BOM (FE FF)
+        else if (uint8Array[0] === 0xFE && uint8Array[1] === 0xFF) {
+          encoding = 'utf-16be';
+        }
+        
+        // Decode the content
+        const decoder = new TextDecoder(encoding);
+        const decodedContent = decoder.decode(arrayBuffer);
+        
+        // Parse TSV/CSV data
+        const lines = decodedContent.split('\n').filter(line => line.trim());
+        const delimiter = decodedContent.includes('\t') ? '\t' : ',';
+        const headers = lines[0].split(delimiter).map(h => h.trim().replace(/^["']|["']$/g, ''));
+        
+        const data = lines.slice(1).map(line => {
+          const values = line.split(delimiter);
+          const row = {};
+          headers.forEach((header, index) => {
+            let value = values[index] || '';
+            // Clean numeric values
+            if (value.includes('$') || value.includes(',') || value.includes('%')) {
+              value = value.replace(/["']/g, '').replace(/\$/g, '').replace(/,/g, '').replace(/%/g, '').trim();
+            }
+            row[header] = value;
+          });
+          return row;
+        });
+        
+        setRawData(data);
+        
+        // Get unique dates and sort them
+        const dates = [...new Set(data.map(row => row['Date']))];
+        dates.sort((a, b) => new Date(a) - new Date(b));
+        setAllDates(dates);
+        
+        // Initialize all branches as visible
+        const branches = [...new Set(data.map(row => row['Experiment ID_D']))];
+        const initialVisibility = {};
+        branches.forEach(branch => {
+          initialVisibility[branch] = true;
+        });
+        setVisibleBranches(initialVisibility);
+        
+        // Reset date range and set default metric
+        setDateRange({ start: 0, end: 100 });
+        
+        // Set default metric to RPS Sessions (% Diff) if it exists
+        const rpsMetric = data.length > 0 && Object.keys(data[0]).find(key => 
+          key.includes('% Difference in RPS') && key.includes('SERP Sessions')
+        );
+        if (rpsMetric) {
+          setSelectedMetric(rpsMetric);
+        }
+        
+        setIsLoading(false);
+      };
+      
+      reader.readAsArrayBuffer(file);
+    } catch (error) {
+      console.error('Error loading file:', error);
+      setIsLoading(false);
+      alert('Error loading file. Please ensure it\'s a valid CSV file.');
+    }
+  };
+
+  // Filter data based on date range
+  const filteredData = useMemo(() => {
+    if (!allDates.length) return rawData;
+    
+    const startIdx = Math.floor((dateRange.start / 100) * (allDates.length - 1));
+    const endIdx = Math.floor((dateRange.end / 100) * (allDates.length - 1));
+    const selectedDates = allDates.slice(startIdx, endIdx + 1);
+    
+    return rawData.filter(row => selectedDates.includes(row['Date']));
+  }, [rawData, dateRange, allDates]);
+
+  // Get valid value range for current metric
+  const getMetricRange = (metric) => {
+    if (!filteredData.length) return { min: 0, max: 0, validMin: null, validMax: null };
+    
+    const values = filteredData
+      .map(row => parseFloat(row[metric]) || 0)
+      .filter(v => !isNaN(v));
+    
+    const min = Math.min(...values);
+    const max = Math.max(...values);
+    
+    // Define valid ranges for different metrics
+    let validMin = null, validMax = null;
+    
+    if (metric.includes('% Difference')) {
+      // For percentage differences, ±5% is often considered significant
+      validMin = -5;
+      validMax = 5;
+    } else if (metric.includes('CTR')) {
+      // For CTR metrics, typical ranges
+      validMin = 20;
+      validMax = 70;
+    } else if (metric === 'Algo Conv') {
+      // For algorithmic conversion
+      validMin = 10;
+      validMax = 30;
+    } else if (metric.includes('RPS')) {
+      // For revenue per session
+      validMin = 0.4;
+      validMax = 0.8;
+    } else if (metric === 'RPC') {
+      // For revenue per click
+      validMin = 0.8;
+      validMax = 1.2;
+    }
+    
+    return { min, max, validMin, validMax };
+  };
+
+  // Process data for visualizations
+  const processData = () => {
+    if (!filteredData.length) return { branches: [], timeSeriesData: [], branchAverages: {} };
+    
+    // Group by branch
+    const grouped = {};
+    filteredData.forEach(row => {
+      const branch = row['Experiment ID_D'];
+      if (!grouped[branch]) grouped[branch] = [];
+      grouped[branch].push(row);
+    });
+    
+    // Calculate averages for filtered data
+    const branchAverages = {};
+    Object.keys(grouped).forEach(branch => {
+      const branchData = grouped[branch];
+      const avgData = {
+        sessions: 0,
+        revenue: 0,
+        rps: 0,
+        rpsDiff: 0,
+        ctr: 0,
+        algoConv: 0,
+        sampleSize: branchData.length
+      };
+      
+      // Calculate averages for all metrics
+      const metrics = ['Home Sessions', 'SERP Sessions', 'Net Revenue', 'RPS (SERP Sessions)', 
+                      'Full CTR', 'Algo Conv', 'RPC', 'SERP Paid CTR',
+                      '% Difference in RPS (SERP Sessions) from the First along Experiment ID_D'];
+      
+      metrics.forEach(metric => {
+        const values = branchData.map(row => parseFloat(row[metric]) || 0);
+        avgData[metric] = values.reduce((a, b) => a + b, 0) / values.length;
+      });
+      
+      avgData.sessions = avgData['Home Sessions'] + avgData['SERP Sessions'];
+      avgData.revenue = avgData['Net Revenue'];
+      avgData.rps = avgData['RPS (SERP Sessions)'];
+      avgData.rpsDiff = avgData['% Difference in RPS (SERP Sessions) from the First along Experiment ID_D'];
+      avgData.ctr = avgData['Full CTR'];
+      avgData.algoConv = avgData['Algo Conv'];
+      
+      branchAverages[branch] = avgData;
+    });
+    
+    // Prepare time series data
+    const timeSeriesData = [];
+    const dates = [...new Set(filteredData.map(row => row['Date']))];
+    
+    // Sort dates properly by parsing them as dates
+    dates.sort((a, b) => {
+      const dateA = new Date(a);
+      const dateB = new Date(b);
+      return dateA - dateB;
+    });
+    
+    dates.forEach(date => {
+      const dataPoint = { 
+        date,
+        // Format date for display
+        displayDate: new Date(date).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+      };
+      Object.keys(grouped).forEach(branch => {
+        const dayData = grouped[branch].find(row => row['Date'] === date);
+        if (dayData) {
+          dataPoint[branch] = parseFloat(dayData[selectedMetric]) || 0;
+        }
+      });
+      timeSeriesData.push(dataPoint);
+    });
+    
+    return { 
+      branches: Object.keys(grouped), 
+      timeSeriesData, 
+      branchAverages,
+      rawData: grouped
+    };
+  };
+
+  const { branches, timeSeriesData, branchAverages, rawData: groupedData } = processData();
+  const metricRange = getMetricRange(selectedMetric);
+
+  // Define color scheme with gradients
+  const getColor = (branch, index) => {
+    const defaultColors = ['#6366f1', '#ec4899', '#10b981', '#f59e0b', '#8b5cf6', '#ef4444', '#14b8a6'];
+    return defaultColors[index % defaultColors.length];
+  };
+
+  const getGradient = (branch, index) => {
+    const defaultGradients = [
+      'from-indigo-500 to-blue-600',
+      'from-pink-500 to-rose-600',
+      'from-emerald-500 to-green-600',
+      'from-amber-500 to-orange-600',
+      'from-purple-500 to-violet-600',
+      'from-red-500 to-red-600',
+      'from-teal-500 to-cyan-600'
+    ];
+    return defaultGradients[index % defaultGradients.length];
+  };
+
+  // Define metric display names and order
+  const metricDisplayNames = {
+    '% Difference in RPS (SERP Sessions) from the First along Experiment ID_D': 'RPS Sessions (% Diff)',
+    'RPS (SERP Sessions)': 'RPS Sessions ($)',
+    '% Difference in RPC from the First along Experiment ID_D': 'RPC (% Diff)',
+    'RPC': 'RPC ($)',
+    '% Difference in Full CTR from the First along Experiment ID_D': 'Full CTR (% Diff)',
+    'Full CTR': 'Full CTR (%)',
+    '% Difference in Content CTR from the First along Experiment ID_D': 'Content CTR (% Diff)',
+    'Content CTR': 'Content CTR (%)',
+    '% Difference in SERP Paid CTR from the First along Experiment ID_D': 'SERP Paid CTR (% Diff)',
+    'SERP Paid CTR': 'SERP Paid CTR (%)',
+    '% Difference in Algo Conv from the First along Experiment ID_D': 'Algo Conv (% Diff)',
+    'Algo Conv': 'Algo Conv (%)',
+    '% Difference in RPS (Home Sessions) from the First along Experiment ID_D': 'RPS Home Sessions (% Diff)',
+    'RPS (Home Sessions)': 'RPS Home Sessions ($)',
+    '% Difference in RPSerps from the First along Experiment ID_D': 'RPS SERPs (% Diff)',
+    'RPSerps': 'RPS SERPs ($)',
+    'Net Revenue': 'Net Revenue ($)'
+  };
+
+  // Define metric order
+  const metricOrder = [
+    '% Difference in RPS (SERP Sessions) from the First along Experiment ID_D',
+    'RPS (SERP Sessions)',
+    '% Difference in RPC from the First along Experiment ID_D',
+    'RPC',
+    '% Difference in Full CTR from the First along Experiment ID_D',
+    'Full CTR',
+    '% Difference in Content CTR from the First along Experiment ID_D',
+    'Content CTR',
+    '% Difference in SERP Paid CTR from the First along Experiment ID_D',
+    'SERP Paid CTR',
+    '% Difference in Algo Conv from the First along Experiment ID_D',
+    'Algo Conv',
+    '% Difference in RPS (Home Sessions) from the First along Experiment ID_D',
+    'RPS (Home Sessions)',
+    '% Difference in RPSerps from the First along Experiment ID_D',
+    'RPSerps',
+    'Net Revenue'
+  ];
+
+  // Metrics for dropdown - filter and sort according to metricOrder
+  const metrics = rawData.length > 0 ? 
+    metricOrder.filter(metric => Object.keys(rawData[0]).includes(metric)) : [];
+
+  // Format metric name for display in dropdown
+  const formatMetricName = (metric) => {
+    return metricDisplayNames[metric] || metric;
+  };
+
+  // Calculate winner based on RPS difference
+  const getWinner = () => {
+    if (!branchAverages || Object.keys(branchAverages).length === 0) return null;
+    
+    const controlBranch = branches.find(b => b.toLowerCase().includes('control'));
+    const nonControlBranches = branches.filter(b => 
+      !b.toLowerCase().includes('control') && !b.toLowerCase().includes('dummy')
+    );
+    
+    let winner = null;
+    let maxRpsDiff = -Infinity;
+    
+    nonControlBranches.forEach(branch => {
+      const rpsDiff = branchAverages[branch]?.rpsDiff || 0;
+      if (rpsDiff > maxRpsDiff) {
+        maxRpsDiff = rpsDiff;
+        winner = branch;
+      }
+    });
+    
+    return { branch: winner, value: maxRpsDiff };
+  };
+
+  const winner = getWinner();
+
+  // Identify anomalies based on filtered data
+  const identifyAnomalies = () => {
+    const anomalies = [];
+    const controlBranch = branches.find(b => b.toLowerCase().includes('control'));
+    
+    // Check for very low Algo Conv in treatment branches
+    branches.forEach(branch => {
+      if (!branch.toLowerCase().includes('control') && branchAverages[branch]) {
+        const algoConv = branchAverages[branch]['Algo Conv'];
+        if (algoConv < 2) {
+          anomalies.push({
+            branch,
+            type: 'Low Algo Conversion',
+            value: algoConv.toFixed(2) + '%',
+            severity: 'high'
+          });
+        }
+      }
+    });
+    
+    // Check for significant CTR drops
+    branches.forEach(branch => {
+      if (!branch.toLowerCase().includes('control') && branchAverages[branch] && controlBranch) {
+        const controlCTR = branchAverages[controlBranch]?.['Full CTR'] || 0;
+        const branchCTR = branchAverages[branch]?.['Full CTR'] || 0;
+        const ctrDiff = ((branchCTR - controlCTR) / controlCTR) * 100;
+        
+        if (ctrDiff < -15) {
+          anomalies.push({
+            branch,
+            type: 'Significant CTR Drop',
+            value: ctrDiff.toFixed(2) + '%',
+            severity: 'medium'
+          });
+        }
+      }
+    });
+    
+    return anomalies;
+  };
+
+  const anomalies = identifyAnomalies();
+
+  // Generate dynamic recommendations based on filtered data
+  const getRecommendations = () => {
+    const recommendations = [];
+    const controlBranch = branches.find(b => b.toLowerCase().includes('control'));
+    
+    // Check for low algo conversion
+    const lowAlgoConvBranches = branches.filter(b => 
+      !b.toLowerCase().includes('control') && branchAverages[b]?.['Algo Conv'] < 2
+    );
+    
+    if (lowAlgoConvBranches.length > 0) {
+      recommendations.push({
+        title: "Investigate Low Algo Conversion",
+        desc: `${lowAlgoConvBranches.join(' and ')} show extremely low algorithmic conversion rates in the selected date range, suggesting a potential tracking issue.`,
+        icon: "🔍"
+      });
+    }
+    
+    // Check for positive performers
+    const positivePerformers = branches.filter(b => 
+      !b.toLowerCase().includes('control') && !b.toLowerCase().includes('dummy') && 
+      branchAverages[b]?.rpsDiff > 0
+    );
+    
+    if (positivePerformers.length > 0) {
+      const best = positivePerformers.reduce((a, b) => 
+        (branchAverages[a]?.rpsDiff || 0) > (branchAverages[b]?.rpsDiff || 0) ? a : b
+      );
+      recommendations.push({
+        title: `Consider ${best} Implementation`,
+        desc: `Shows ${branchAverages[best]?.rpsDiff.toFixed(2)}% RPS improvement in the selected period. This could be a winning variant if issues are resolved.`,
+        icon: "🚀"
+      });
+    }
+    
+    // Check for poor performers
+    const poorPerformers = branches.filter(b => 
+      !b.toLowerCase().includes('control') && !b.toLowerCase().includes('dummy') && 
+      branchAverages[b]?.rpsDiff < -10
+    );
+    
+    if (poorPerformers.length > 0) {
+      recommendations.push({
+        title: "Review Poor Performers",
+        desc: `${poorPerformers.join(' and ')} show significant negative impact. Consider discontinuing these approaches.`,
+        icon: "📊"
+      });
+    }
+    
+    // Check dummy branch
+    const dummyBranch = branches.find(b => b.toLowerCase().includes('dummy'));
+    if (dummyBranch && branchAverages[dummyBranch]?.rpsDiff > 2) {
+      recommendations.push({
+        title: "Validate AA Test (Dummy Branch)",
+        desc: `The ${dummyBranch} shows ${branchAverages[dummyBranch]?.rpsDiff.toFixed(2)}% difference, suggesting potential randomization issues in the selected timeframe.`,
+        icon: "⚠️"
+      });
+    }
+    
+    return recommendations;
+  };
+
+  const recommendations = getRecommendations();
+
+  // Toggle branch visibility
+  const toggleBranch = (branch) => {
+    setVisibleBranches(prev => ({
+      ...prev,
+      [branch]: !prev[branch]
+    }));
+  };
+
+  // Custom tooltip
+  const CustomTooltip = ({ active, payload, label }) => {
+    if (active && payload && payload.length) {
+      return (
+        <div className="bg-white/95 backdrop-blur-sm p-4 rounded-lg shadow-xl border border-gray-200">
+          <p className="font-semibold text-gray-900 mb-2">{label}</p>
+          {payload.map((entry, index) => (
+            <p key={index} style={{ color: entry.color }} className="text-sm font-medium">
+              {entry.name}: {typeof entry.value === 'number' ? entry.value.toFixed(2) : entry.value}
+              {selectedMetric.includes('%') || selectedMetric.includes('CTR') || selectedMetric.includes('Conv') ? '%' : 
+               selectedMetric.includes('RPS') || selectedMetric.includes('RPC') ? '' : ''}
+            </p>
+          ))}
+        </div>
+      );
+    }
+    return null;
+  };
+
+  // Format date for display
+  const formatDateRange = () => {
+    if (!allDates.length) return '';
+    const startIdx = Math.floor((dateRange.start / 100) * (allDates.length - 1));
+    const endIdx = Math.floor((dateRange.end / 100) * (allDates.length - 1));
+    const startDate = new Date(allDates[startIdx]).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    const endDate = new Date(allDates[endIdx]).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    return `${startDate} - ${endDate}`;
+  };
+
+  // File upload screen
+  if (!rawData.length && !isLoading) {
+    return (
+      <div className="flex items-center justify-center h-screen bg-gradient-to-br from-gray-900 via-blue-900 to-purple-900">
+        <div className="bg-white/10 backdrop-blur-md rounded-2xl shadow-2xl p-12 border border-white/20 max-w-md w-full mx-4">
+          <div className="text-center">
+            <div className="mb-6">
+              <FileText className="h-16 w-16 text-blue-400 mx-auto mb-4" />
+              <h2 className="text-2xl font-bold text-white mb-2">A/B Test Dashboard</h2>
+              <p className="text-gray-300">Upload your experiment data to get started</p>
+            </div>
+            
+            <label className="block">
+              <input
+                type="file"
+                accept=".csv,.tsv,.txt"
+                onChange={handleFileUpload}
+                className="hidden"
+              />
+              <div className="cursor-pointer bg-gradient-to-r from-blue-500 to-indigo-600 text-white font-medium py-4 px-8 rounded-xl hover:from-blue-600 hover:to-indigo-700 transition-all duration-300 transform hover:scale-105 inline-flex items-center">
+                <Upload className="h-5 w-5 mr-2" />
+                Choose CSV File
+              </div>
+            </label>
+            
+            <div className="mt-6 text-sm text-gray-400">
+              <p>Supported formats: CSV, TSV</p>
+              <p className="mt-2">Expected columns: Date, Experiment ID_D, metrics...</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Loading screen
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center h-screen bg-gradient-to-br from-gray-900 via-blue-900 to-purple-900">
+        <div className="text-center">
+          <div className="relative">
+            <div className="animate-spin rounded-full h-16 w-16 border-4 border-blue-400 border-t-transparent mx-auto mb-4"></div>
+            <div className="absolute inset-0 animate-ping rounded-full h-16 w-16 border-4 border-blue-400 opacity-20 mx-auto mb-4"></div>
+          </div>
+          <p className="text-white text-lg font-medium">Loading {fileName}...</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-gray-900 via-blue-900 to-purple-900">
+      <div className="min-h-screen backdrop-blur-sm bg-black/20">
+        <div className="max-w-7xl mx-auto p-6">
+          {/* Header */}
+          <div className="bg-white/10 backdrop-blur-md rounded-2xl shadow-2xl p-8 mb-8 border border-white/20">
+            <div className="flex items-center justify-between">
+              <div>
+                <h1 className="text-4xl font-bold text-white mb-2 bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent">
+                  A/B Test Results Dashboard
+                </h1>
+                <p className="text-gray-300">Analyzing: {fileName}</p>
+              </div>
+              <div className="flex items-center space-x-4">
+                <label className="cursor-pointer bg-white/10 backdrop-blur-sm text-white font-medium py-2 px-4 rounded-lg hover:bg-white/20 transition-all duration-300 inline-flex items-center">
+                  <Upload className="h-4 w-4 mr-2" />
+                  New File
+                  <input
+                    type="file"
+                    accept=".csv,.tsv,.txt"
+                    onChange={handleFileUpload}
+                    className="hidden"
+                  />
+                </label>
+                <Activity className="h-8 w-8 text-blue-400 animate-pulse" />
+              </div>
+            </div>
+          </div>
+
+          {/* Date Range Slider */}
+          <div className="bg-white/10 backdrop-blur-md rounded-2xl shadow-2xl p-6 mb-8 border border-white/20">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center">
+                <Calendar className="h-5 w-5 text-blue-400 mr-2" />
+                <h3 className="text-lg font-semibold text-white">Date Range Filter</h3>
+              </div>
+              <span className="text-sm text-gray-300">{formatDateRange()}</span>
+            </div>
+            <div className="flex items-center space-x-4">
+              <span className="text-sm text-gray-300">Start</span>
+              <input
+                type="range"
+                min="0"
+                max="100"
+                value={dateRange.start}
+                onChange={(e) => setDateRange(prev => ({ ...prev, start: Math.min(Number(e.target.value), prev.end - 1) }))}
+                className="flex-1 h-2 bg-white/20 rounded-lg appearance-none cursor-pointer slider"
+                style={{
+                  background: `linear-gradient(to right, transparent ${dateRange.start}%, #3b82f6 ${dateRange.start}%, #3b82f6 ${dateRange.end}%, transparent ${dateRange.end}%)`
+                }}
+              />
+              <span className="text-sm text-gray-300 w-10 text-center">{dateRange.start}%</span>
+              <div className="w-px h-6 bg-white/20"></div>
+              <span className="text-sm text-gray-300">End</span>
+              <input
+                type="range"
+                min="0"
+                max="100"
+                value={dateRange.end}
+                onChange={(e) => setDateRange(prev => ({ ...prev, end: Math.max(Number(e.target.value), prev.start + 1) }))}
+                className="flex-1 h-2 bg-white/20 rounded-lg appearance-none cursor-pointer slider"
+                style={{
+                  background: `linear-gradient(to right, transparent ${dateRange.start}%, #3b82f6 ${dateRange.start}%, #3b82f6 ${dateRange.end}%, transparent ${dateRange.end}%)`
+                }}
+              />
+              <span className="text-sm text-gray-300 w-10 text-center">{dateRange.end}%</span>
+            </div>
+          </div>
+
+          {/* Key Insights */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+            {/* Winner Card */}
+            <div 
+              className="relative overflow-hidden rounded-2xl shadow-xl transform transition-all duration-300 hover:scale-105 hover:shadow-2xl"
+              onMouseEnter={() => setHoveredCard('winner')}
+              onMouseLeave={() => setHoveredCard(null)}
+            >
+              <div className="absolute inset-0 bg-gradient-to-br from-emerald-500 to-green-600"></div>
+              <div className="absolute inset-0 bg-black/10"></div>
+              <div className="relative p-6 text-white">
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-lg font-semibold">Test Winner</h3>
+                  <div className={`transition-transform duration-300 ${hoveredCard === 'winner' ? 'rotate-12 scale-110' : ''}`}>
+                    <Award className="h-8 w-8" />
+                  </div>
+                </div>
+                {winner && winner.value > 0 ? (
+                  <>
+                    <p className="text-2xl font-bold mb-1">{winner.branch}</p>
+                    <p className="text-sm opacity-90">+{winner.value.toFixed(2)}% RPS improvement</p>
+                  </>
+                ) : (
+                  <p className="text-white/80">No significant winner in selected period</p>
+                )}
+              </div>
+            </div>
+
+            {/* Statistical Significance */}
+            <div 
+              className="relative overflow-hidden rounded-2xl shadow-xl transform transition-all duration-300 hover:scale-105 hover:shadow-2xl"
+              onMouseEnter={() => setHoveredCard('sample')}
+              onMouseLeave={() => setHoveredCard(null)}
+            >
+              <div className="absolute inset-0 bg-gradient-to-br from-blue-500 to-indigo-600"></div>
+              <div className="absolute inset-0 bg-black/10"></div>
+              <div className="relative p-6 text-white">
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-lg font-semibold">Sample Size</h3>
+                  <div className={`transition-transform duration-300 ${hoveredCard === 'sample' ? 'rotate-12 scale-110' : ''}`}>
+                    <Users className="h-8 w-8" />
+                  </div>
+                </div>
+                <div className="flex justify-between items-start">
+                  <div className="flex-1">
+                    <p className="text-2xl font-bold mb-1">
+                      {Math.round(Object.values(branchAverages).reduce((sum, b) => sum + (b['Home Sessions'] || 0), 0)).toLocaleString()}
+                    </p>
+                    <p className="text-xs opacity-90">Home Sessions</p>
+                  </div>
+                  <div className="w-px bg-white/20 mx-3"></div>
+                  <div className="flex-1 text-right">
+                    <p className="text-2xl font-bold mb-1">
+                      {Math.round(Object.values(branchAverages).reduce((sum, b) => sum + (b['SERP Sessions'] || 0), 0)).toLocaleString()}
+                    </p>
+                    <p className="text-xs opacity-90">SERP Sessions</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Anomalies */}
+            <div 
+              className="relative overflow-hidden rounded-2xl shadow-xl transform transition-all duration-300 hover:scale-105 hover:shadow-2xl"
+              onMouseEnter={() => setHoveredCard('anomalies')}
+              onMouseLeave={() => setHoveredCard(null)}
+            >
+              <div className="absolute inset-0 bg-gradient-to-br from-red-500 to-pink-600"></div>
+              <div className="absolute inset-0 bg-black/10"></div>
+              <div className="relative p-6 text-white">
+                <div className="flex items-center justify-between mb-4">
+                  <h3 className="text-lg font-semibold">Anomalies Detected</h3>
+                  <div className={`transition-transform duration-300 ${hoveredCard === 'anomalies' ? 'rotate-12 scale-110' : ''}`}>
+                    <AlertCircle className="h-8 w-8" />
+                  </div>
+                </div>
+                <p className="text-2xl font-bold mb-1">{anomalies.length}</p>
+                <p className="text-sm opacity-90">Issues in selected period</p>
+              </div>
+            </div>
+          </div>
+
+          {/* Main Chart */}
+          <div className="bg-white/10 backdrop-blur-md rounded-2xl shadow-2xl p-8 mb-8 border border-white/20">
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center mb-6 gap-4">
+              <h3 className="text-2xl font-bold text-white">Metric Performance Over Time</h3>
+              <div className="min-w-[250px]">
+                <select
+                  value={selectedMetric}
+                  onChange={(e) => setSelectedMetric(e.target.value)}
+                  className="w-full px-4 py-2 bg-white/10 backdrop-blur-sm border border-white/20 text-white rounded-lg focus:ring-2 focus:ring-blue-400 focus:border-transparent transition-all duration-200 hover:bg-white/20"
+                >
+                  {metrics.map(metric => (
+                    <option key={metric} value={metric} className="bg-gray-800 text-white">
+                      {formatMetricName(metric)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+
+            {/* Branch Toggle Controls */}
+            <div className="mb-6 flex flex-wrap gap-3">
+              {branches.map((branch, index) => (
+                <label key={branch} className="flex items-center space-x-2 cursor-pointer group">
+                  <input
+                    type="checkbox"
+                    checked={visibleBranches[branch]}
+                    onChange={() => toggleBranch(branch)}
+                    className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                  />
+                  <span 
+                    className="text-sm font-medium text-gray-300 group-hover:text-white transition-colors"
+                    style={{ color: visibleBranches[branch] ? getColor(branch, index) : undefined }}
+                  >
+                    {branch}
+                  </span>
+                </label>
+              ))}
+            </div>
+            
+            <ResponsiveContainer width="100%" height={400}>
+              <AreaChart data={timeSeriesData}>
+                <defs>
+                  {branches.map((branch, index) => (
+                    <linearGradient key={branch} id={`gradient-${branch}`} x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor={getColor(branch, index)} stopOpacity={0.3}/>
+                      <stop offset="95%" stopColor={getColor(branch, index)} stopOpacity={0}/>
+                    </linearGradient>
+                  ))}
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.1)" />
+                <XAxis 
+                  dataKey="displayDate" 
+                  angle={-45}
+                  textAnchor="end"
+                  height={80}
+                  stroke="rgba(255,255,255,0.6)"
+                />
+                <YAxis stroke="rgba(255,255,255,0.6)" />
+                <Tooltip content={<CustomTooltip />} />
+                <Legend wrapperStyle={{ color: 'white' }} />
+                
+                {/* Add reference lines for valid range */}
+                {metricRange.validMin !== null && (
+                  <ReferenceLine 
+                    y={metricRange.validMin} 
+                    stroke="#10b981" 
+                    strokeDasharray="5 5" 
+                    label={{ value: "Valid Min", fill: "#10b981", position: "left" }}
+                  />
+                )}
+                {metricRange.validMax !== null && (
+                  <ReferenceLine 
+                    y={metricRange.validMax} 
+                    stroke="#10b981" 
+                    strokeDasharray="5 5" 
+                    label={{ value: "Valid Max", fill: "#10b981", position: "left" }}
+                  />
+                )}
+                
+                {branches.filter(branch => visibleBranches[branch]).map((branch, index) => (
+                  <Area
+                    key={branch}
+                    type="monotone"
+                    dataKey={branch}
+                    stroke={getColor(branch, index)}
+                    strokeWidth={2}
+                    fill={`url(#gradient-${branch})`}
+                    name={branch}
+                  />
+                ))}
+              </AreaChart>
+            </ResponsiveContainer>
+            
+            {/* Valid Range Indicator */}
+            {(metricRange.validMin !== null || metricRange.validMax !== null) && (
+              <div className="mt-4 text-sm text-gray-300">
+                <span className="font-medium">Valid Range: </span>
+                {metricRange.validMin !== null && metricRange.validMax !== null ? 
+                  `${metricRange.validMin} to ${metricRange.validMax}` :
+                  metricRange.validMin !== null ? `Above ${metricRange.validMin}` : `Below ${metricRange.validMax}`
+                }
+                <span className="text-gray-400 ml-2">
+                  {selectedMetric.includes('%') || selectedMetric.includes('CTR') || selectedMetric.includes('Conv') ? '%' : ''}
+                </span>
+              </div>
+            )}
+          </div>
+
+          {/* Branch Performance Cards */}
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 mb-8">
+            {branches.filter(b => !b.toLowerCase().includes('dummy')).map((branch, index) => {
+              const data = branchAverages[branch];
+              const isControl = branch.toLowerCase().includes('control');
+              const rpsDiff = data?.rpsDiff || 0;
+              
+              return (
+                <div 
+                  key={branch} 
+                  className={`relative overflow-hidden rounded-2xl shadow-xl transform transition-all duration-300 hover:scale-105 hover:shadow-2xl ${
+                    isControl ? 'ring-2 ring-blue-400 ring-offset-2 ring-offset-transparent' : ''
+                  }`}
+                >
+                  <div className={`absolute inset-0 bg-gradient-to-br ${getGradient(branch, index)}`}></div>
+                  <div className="absolute inset-0 bg-black/20"></div>
+                  <div className="relative p-6 text-white">
+                    <div className="flex justify-between items-start mb-4">
+                      <div>
+                        <h4 className="font-bold text-lg mb-1">{branch}</h4>
+                        {isControl && (
+                          <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-white/20 backdrop-blur-sm">
+                            <Target className="w-3 h-3 mr-1" />
+                            BASELINE
+                          </span>
+                        )}
+                      </div>
+                      <button
+                        onClick={() => setExpandedBranch(expandedBranch === branch ? null : branch)}
+                        className="text-white/60 hover:text-white transition-colors duration-200"
+                      >
+                        {expandedBranch === branch ? <ChevronUp /> : <ChevronDown />}
+                      </button>
+                    </div>
+                    
+                    <div className="space-y-3">
+                      <div className="flex justify-between items-center">
+                        <span className="text-sm opacity-80">RPS Sessions</span>
+                        <span className="font-bold text-lg">${data?.['RPS (SERP Sessions)']?.toFixed(2) || 'N/A'}</span>
+                      </div>
+                      
+                      <div className="flex justify-between items-center">
+                        <span className="text-sm opacity-80">RPS Sessions Diff</span>
+                        <div className="flex items-center">
+                          {rpsDiff !== 0 && (
+                            rpsDiff > 0 ? 
+                              <TrendingUp className="w-4 h-4 mr-1" /> : 
+                              <TrendingDown className="w-4 h-4 mr-1" />
+                          )}
+                          <span className="font-bold text-lg">
+                            {rpsDiff > 0 ? '+' : ''}{rpsDiff.toFixed(2)}%
+                          </span>
+                        </div>
+                      </div>
+                      
+                      <div className={`overflow-hidden transition-all duration-300 ${
+                        expandedBranch === branch ? 'max-h-96 opacity-100' : 'max-h-0 opacity-0'
+                      }`}>
+                        <div className="pt-3 mt-3 border-t border-white/20 space-y-2 max-h-80 overflow-y-auto">
+                          {/* Show all metrics in order */}
+                          {metrics.map(metric => {
+                            const value = data?.[metric];
+                            if (value === undefined) return null;
+                            
+                            return (
+                              <div key={metric} className="flex justify-between items-center py-1">
+                                <span className="text-xs opacity-80">{formatMetricName(metric).replace(' (% Diff)', '').replace(' ($)', '').replace(' (%)', '')}</span>
+                                <span className="text-sm font-medium">
+                                  {formatMetricName(metric).includes('($)') && '$'}
+                                  {typeof value === 'number' ? value.toFixed(2) : value}
+                                  {formatMetricName(metric).includes('(%)') && '%'}
+                                  {formatMetricName(metric).includes('(% Diff)') && '%'}
+                                </span>
+                              </div>
+                            );
+                          })}
+                          <div className="flex justify-between items-center pt-2 border-t border-white/20">
+                            <span className="text-xs opacity-80">Days in Range</span>
+                            <span className="text-sm font-medium">{data?.sampleSize || 0}</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          {/* Anomalies Detail */}
+          {anomalies.length > 0 && (
+            <div className="bg-white/10 backdrop-blur-md rounded-2xl shadow-2xl p-8 mb-8 border border-white/20">
+              <h3 className="text-2xl font-bold text-white mb-6">Data Anomalies in Selected Period</h3>
+              <div className="space-y-4">
+                {anomalies.map((anomaly, idx) => (
+                  <div 
+                    key={idx} 
+                    className={`p-5 rounded-xl border backdrop-blur-sm transition-all duration-300 hover:scale-102 ${
+                      anomaly.severity === 'high' 
+                        ? 'bg-red-500/20 border-red-400/40 hover:bg-red-500/30' 
+                        : 'bg-yellow-500/20 border-yellow-400/40 hover:bg-yellow-500/30'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <p className="font-bold text-white">{anomaly.branch}</p>
+                        <p className="text-sm text-gray-300 mt-1">{anomaly.type}: {anomaly.value}</p>
+                      </div>
+                      <div className={`p-2 rounded-full ${
+                        anomaly.severity === 'high' ? 'bg-red-500/30' : 'bg-yellow-500/30'
+                      }`}>
+                        <AlertCircle className={`h-6 w-6 ${
+                          anomaly.severity === 'high' ? 'text-red-400' : 'text-yellow-400'
+                        }`} />
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Recommendations */}
+          <div className="bg-gradient-to-br from-blue-600/20 to-purple-600/20 backdrop-blur-md rounded-2xl shadow-2xl p-8 border border-white/20">
+            <div className="flex items-center mb-6">
+              <Zap className="h-8 w-8 text-yellow-400 mr-3" />
+              <h3 className="text-2xl font-bold text-white">Recommendations for Selected Period</h3>
+            </div>
+            <div className="space-y-4">
+              {recommendations.length > 0 ? recommendations.map((rec, idx) => (
+                <div key={idx} className="flex items-start group">
+                  <div className="flex-shrink-0 w-12 h-12 bg-white/10 backdrop-blur-sm rounded-xl flex items-center justify-center mr-4 group-hover:bg-white/20 transition-all duration-300">
+                    <span className="text-2xl">{rec.icon}</span>
+                  </div>
+                  <div className="flex-1">
+                    <p className="font-bold text-white mb-1 text-lg">{rec.title}</p>
+                    <p className="text-gray-300 leading-relaxed">{rec.desc}</p>
+                  </div>
+                </div>
+              )) : (
+                <p className="text-gray-300">No specific recommendations for the selected date range.</p>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default Dashboard;
